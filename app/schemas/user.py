@@ -1,6 +1,7 @@
 """User schemas for request/response validation."""
 from datetime import datetime
 from typing import Optional
+from uuid import UUID as UUIDType
 from pydantic import BaseModel, EmailStr, Field
 
 
@@ -27,7 +28,7 @@ class UserUpdate(BaseModel):
 
 class UserResponse(UserBase):
     """Schema for user response."""
-    id: int
+    id: UUIDType
     is_active: bool
     is_superuser: bool
     created_at: datetime

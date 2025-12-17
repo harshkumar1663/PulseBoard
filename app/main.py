@@ -1,5 +1,9 @@
-from fastapi import FastAPI
+from fastapi import FastAPI # type: ignore
+import asyncio
 from app.core.config import settings
+from app.api import api_router
+from app.db.session import engine, Base
+import app.db.base  # noqa: F401 ensures models are imported
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -16,3 +20,13 @@ async def health_check():
         "service": settings.PROJECT_NAME,
         "version": settings.VERSION,
     }
+
+
+app.include_router(api_router, prefix="/api")
+
+
+@app.on_event("startup")
+async def on_startup():
+    # Tables will be created via Alembic migrations
+    # Temporarily disabled to avoid DB creation issues
+    pass

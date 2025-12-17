@@ -1,5 +1,6 @@
 """User service for business logic."""
 from typing import Optional
+from uuid import UUID as UUIDType
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from fastapi import HTTPException, status
@@ -13,7 +14,7 @@ class UserService:
     """Service layer for user operations."""
     
     @staticmethod
-    async def get_by_id(db: AsyncSession, user_id: int) -> Optional[User]:
+    async def get_by_id(db: AsyncSession, user_id: UUIDType) -> Optional[User]:
         """Get user by ID."""
         result = await db.execute(select(User).where(User.id == user_id))
         return result.scalar_one_or_none()

@@ -7,9 +7,8 @@ from fastapi import HTTPException, status
 
 from app.core.config import settings
 
-
-# Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Use argon2 for password hashing (no 72-byte limitation like bcrypt)
+pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:

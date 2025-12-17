@@ -1,5 +1,6 @@
 """Dependency injection for FastAPI routes."""
 from typing import AsyncGenerator, Optional
+from uuid import UUID as UUIDType
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,7 +36,13 @@ async def get_current_user(
     payload = decode_token(token)
     verify_token_type(payload, "access")
     
-    user_id: Optional[int] = payload.get("sub")
+    user_id_value = payload.get("sub")
+    user_id: Optional[UUIDType] = None
+    try:
+        if user_id_value is not None:
+            user_id = UUIDType(user_id_value)
+    except Exception:
+        user_id = None
     if user_id is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

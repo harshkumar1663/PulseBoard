@@ -1,11 +1,13 @@
 """Authentication routes."""
+from uuid import UUID as UUIDType
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.dependencies import get_db
+from app.core.dependencies import get_db, get_current_user
 from app.core.security import create_access_token, create_refresh_token, decode_token, verify_token_type
 from app.schemas.user import UserCreate, UserResponse, UserLogin, Token, TokenRefresh
 from app.services.user_service import user_service
+from app.models.user import User
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -59,26 +61,40 @@ async def refresh_token(
     """Refresh access token using refresh token."""
     payload = decode_token(token_data.refresh_token)
     verify_token_type(payload, "refresh")
-    
-    user_id = payload.get("sub")
-    if not user_id:
+
+    user_id_value = payload.get("sub")
+    if not user_id_value:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token",
         )
-    
-    user = await user_service.get_by_id(db, int(user_id))
+
+    try:
+        user_id = UUIDType(user_id_value)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token format",
+        )
+
+    user = await user_service.get_by_id(db, user_id)
     if not user or not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User not found or inactive",
         )
-    
+
     access_token = create_access_token(data={"sub": str(user.id)})
     new_refresh_token = create_refresh_token(data={"sub": str(user.id)})
-    
+
     return Token(
         access_token=access_token,
         refresh_token=new_refresh_token,
         token_type="bearer"
     )
+
+
+@router.get("/me", response_model=UserResponse)
+async def read_me(current_user: User = Depends(get_current_user)):
+    """Return the current authenticated user."""
+    return current_user
