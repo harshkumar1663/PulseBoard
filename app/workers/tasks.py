@@ -1,187 +1,394 @@
-"""Celery tasks for background processing."""
-from datetime import datetime, timedelta
-from typing import Optional
-from celery import Task
-from sqlalchemy import select, delete
+"""Celery tasks for async event processing."""
+import json
+import logging
+from datetime import datetime
+from typing import Optional, Dict, Any
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.workers.celery_app import celery_app
-from app.db.session import async_session_maker
+from app.db.session import sync_session_maker
 from app.models.event import Event
-from app.models.metric import Metric
-from app.services.event_service import event_service
-from app.services.metric_service import metric_service
-from app.db.redis import redis_client
+from app.models.user import User
+from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
-class AsyncTask(Task):
-    """Base task class with async database session."""
+class PayloadValidationError(Exception):
+    """Raised when event payload validation fails."""
+    pass
+
+
+def validate_payload_shape(payload: Any) -> dict:
+    """
+    Validate event payload shape and structure.
     
-    _session = None
+    - Must be dict or None
+    - All values must be JSON-serializable
+    - Max depth: 10 levels
+    - Max size: 1MB
+    """
+    if payload is None:
+        return {}
     
-    @property
-    def session(self):
-        """Get or create database session."""
-        if self._session is None:
-            self._session = async_session_maker()
-        return self._session
+    if not isinstance(payload, dict):
+        raise PayloadValidationError(f"Payload must be dict, got {type(payload).__name__}")
+    
+    # Check JSON serializability
+    try:
+        payload_json = json.dumps(payload)
+    except (TypeError, ValueError) as e:
+        raise PayloadValidationError(f"Payload not JSON-serializable: {str(e)}")
+    
+    # Check size limit (1MB)
+    if len(payload_json) > 1024 * 1024:
+        raise PayloadValidationError("Payload exceeds 1MB size limit")
+    
+    # Validate depth (max 10 levels)
+    def check_depth(obj, depth=0):
+        if depth > 10:
+            raise PayloadValidationError("Payload exceeds max nesting depth (10)")
+        if isinstance(obj, dict):
+            for v in obj.values():
+                check_depth(v, depth + 1)
+        elif isinstance(obj, (list, tuple)):
+            for v in obj:
+                check_depth(v, depth + 1)
+    
+    check_depth(payload)
+    return payload
 
 
-@celery_app.task(bind=True, name="app.workers.tasks.process_event_task")
-def process_event_task(self, event_id: int):
-    """Process an event and generate metrics asynchronously."""
-    import asyncio
+def normalize_event_payload(payload: dict) -> dict:
+    """
+    Normalize event payload and attach metadata.
     
-    async def _process():
-        async with async_session_maker() as session:
-            try:
-                # Get event
-                result = await session.execute(
-                    select(Event).where(Event.id == event_id)
-                )
-                event = result.scalar_one_or_none()
-                
-                if not event or event.processed:
-                    return
-                
-                # Generate metrics based on event
-                # Example: Count events by type
-                metric_data = {
-                    "metric_name": f"event.{event.event_type}.count",
-                    "metric_type": "counter",
-                    "value": 1.0,
-                    "dimensions": {
-                        "event_name": event.event_name,
-                        "source": event.source or "unknown"
-                    },
-                    "time_bucket": "minute",
-                    "timestamp": event.event_timestamp
+    Preserves original payload and adds:
+    - processed_timestamp: When normalization occurred
+    - normalized_at: ISO timestamp
+    """
+    normalized = {
+        "original": payload,
+        "normalized_at": datetime.utcnow().isoformat(),
+    }
+    
+    # Extract and normalize common fields
+    if "page" in payload:
+        normalized["page"] = str(payload.get("page", "")).strip()
+    
+    if "referrer" in payload:
+        normalized["referrer"] = str(payload.get("referrer", "")).strip()
+    
+    if "duration" in payload:
+        try:
+            normalized["duration"] = float(payload.get("duration", 0))
+        except (ValueError, TypeError):
+            normalized["duration"] = 0.0
+    
+    if "scroll_depth" in payload:
+        try:
+            normalized["scroll_depth"] = float(payload.get("scroll_depth", 0))
+        except (ValueError, TypeError):
+            normalized["scroll_depth"] = 0.0
+    
+    return normalized
+
+
+def fetch_event_with_user(session: Session, event_id: int) -> tuple[Optional[Event], Optional[User]]:
+    """
+    Fetch event and associated user.
+    
+    Returns:
+        (event, user) tuple or (None, None) if not found
+    """
+    stmt = select(Event).where(Event.id == event_id)
+    result = session.execute(stmt)
+    event = result.scalar_one_or_none()
+    
+    if not event:
+        return None, None
+    
+    user_stmt = select(User).where(User.id == event.user_id)
+    user_result = session.execute(user_stmt)
+    user = user_result.scalar_one_or_none()
+    
+    return event, user
+
+
+def persist_event_to_db(session: Session, event: Optional[Event] = None) -> None:
+    """
+    Persist event changes to database.
+    
+    Args:
+        session: Database session
+        event: Event to flush (optional, used for logging)
+    
+    If event is None, commits all pending changes in session.
+    """
+    session.flush()
+    session.commit()
+    if event:
+        logger.debug(f"Event {event.id} persisted to database")
+    else:
+        logger.debug("Batch events persisted to database")
+
+
+@celery_app.task(
+    bind=True,
+    name="app.workers.tasks.process_event",
+    max_retries=settings.EVENT_MAX_RETRIES,
+    default_retry_delay=settings.EVENT_RETRY_DELAY,
+    time_limit=settings.EVENT_PROCESSING_TIMEOUT,
+)
+def process_event(self, event_id: int) -> Dict[str, Any]:
+    """
+    Process single event synchronously.
+    
+    Workflow:
+    1. Fetch event and user from DB
+    2. Validate payload shape
+    3. Normalize payload (attach metadata)
+    4. Update event properties
+    5. Mark processed_at with current timestamp
+    6. Persist to DB
+    7. Retry on failure with exponential backoff
+    """
+    with sync_session_maker() as session:
+        try:
+            logger.info(f"[Event {event_id}] Starting processing")
+            
+            # 1. Fetch event and user
+            event, user = fetch_event_with_user(session, event_id)
+            
+            if not event:
+                logger.warning(f"[Event {event_id}] Event not found in database")
+                return {
+                    "status": "error",
+                    "event_id": event_id,
+                    "message": "Event not found",
                 }
+            
+            if event.processed:
+                logger.info(f"[Event {event_id}] Already processed, skipping")
+                return {
+                    "status": "skipped",
+                    "event_id": event_id,
+                    "message": "Event already processed",
+                }
+            
+            logger.debug(f"[Event {event_id}] User: {user.email if user else 'unknown'}")
+            
+            # 2. Validate payload shape
+            try:
+                validated_payload = validate_payload_shape(event.payload)
+                logger.debug(f"[Event {event_id}] Payload validation passed")
+            except PayloadValidationError as e:
+                error_msg = f"Payload validation failed: {str(e)}"
+                logger.error(f"[Event {event_id}] {error_msg}")
+                event.processing_error = error_msg[:255]
+                persist_event_to_db(session, event)
+                return {
+                    "status": "validation_error",
+                    "event_id": event_id,
+                    "error": error_msg,
+                }
+            
+            # 3. Validate required event fields
+            if not event.event_name or not event.event_type:
+                error_msg = "Missing required fields: event_name and/or event_type"
+                logger.error(f"[Event {event_id}] {error_msg}")
+                event.processing_error = error_msg[:255]
+                persist_event_to_db(session, event)
+                return {
+                    "status": "validation_error",
+                    "event_id": event_id,
+                    "error": error_msg,
+                }
+            
+            # 4. Normalize payload with metadata
+            normalized_payload = normalize_event_payload(validated_payload)
+            event.properties = normalized_payload
+            logger.debug(f"[Event {event_id}] Payload normalized")
+            
+            # 5. Attach metadata to event
+            event.processing_error = None
+            
+            # 6. Mark processed_at with current timestamp
+            now = datetime.utcnow()
+            event.processed = True
+            event.processed_at = now
+            logger.debug(f"[Event {event_id}] Marked processed at {now.isoformat()}")
+            
+            # 7. Persist to database
+            persist_event_to_db(session, event)
+            
+            logger.info(f"[Event {event_id}] Processing completed successfully")
+            return {
+                "status": "success",
+                "event_id": event_id,
+                "event_name": event.event_name,
+                "event_type": event.event_type,
+                "user_id": str(event.user_id),
+                "processed_at": event.processed_at.isoformat(),
+            }
+            
+        except PayloadValidationError as e:
+            session.rollback()
+            logger.error(f"[Event {event_id}] Payload validation error: {str(e)}")
+            return {
+                "status": "validation_error",
+                "event_id": event_id,
+                "error": str(e),
+            }
+        
+        except Exception as e:
+            session.rollback()
+            error_msg = f"Processing error: {str(e)}"
+            logger.error(f"[Event {event_id}] {error_msg}", exc_info=True)
+            
+            # Attempt to update event with error before retrying
+            try:
+                with sync_session_maker() as error_session:
+                    event, _ = fetch_event_with_user(error_session, event_id)
+                    if event:
+                        event.processing_error = error_msg[:255]
+                        persist_event_to_db(error_session, event)
+            except Exception as update_error:
+                logger.error(f"[Event {event_id}] Failed to log error: {str(update_error)}")
+            
+            # Retry with exponential backoff
+            if self.request.retries < settings.EVENT_MAX_RETRIES:
+                retry_in = 2 ** self.request.retries
+                logger.info(
+                    f"[Event {event_id}] Retrying in {retry_in}s "
+                    f"(attempt {self.request.retries + 1}/{settings.EVENT_MAX_RETRIES})"
+                )
+                raise self.retry(exc=e, countdown=retry_in)
+            else:
+                logger.error(f"[Event {event_id}] Max retries ({settings.EVENT_MAX_RETRIES}) exceeded")
+                return {
+                    "status": "failed",
+                    "event_id": event_id,
+                    "error": error_msg,
+                    "retries_exhausted": True,
+                }
+
+
+@celery_app.task(
+    bind=True,
+    name="app.workers.tasks.process_events_batch",
+    max_retries=settings.EVENT_MAX_RETRIES,
+    default_retry_delay=settings.EVENT_RETRY_DELAY,
+)
+def process_events_batch(self, event_ids: list[int]) -> Dict[str, Any]:
+    """
+    Process multiple events in batch synchronously.
+    
+    Workflow (for each event):
+    1. Fetch event and user
+    2. Validate payload shape
+    3. Normalize payload
+    4. Mark processed_at
+    5. Persist to DB
+    
+    Returns:
+        Summary with processed count and individual results
+    """
+    with sync_session_maker() as session:
+        processed_count = 0
+        failed_count = 0
+        results = []
+        
+        logger.info(f"[Batch] Processing {len(event_ids)} events")
+        
+        for event_id in event_ids:
+            try:
+                # 1. Fetch event and user
+                event, user = fetch_event_with_user(session, event_id)
                 
-                # Create metric (simplified inline creation)
-                from app.schemas.metric import MetricCreate
-                metric_in = MetricCreate(**metric_data)
-                await metric_service.create(session, metric_in)
+                if not event:
+                    logger.warning(f"[Event {event_id}] Not found in batch")
+                    results.append({"event_id": event_id, "status": "not_found"})
+                    continue
                 
-                # Mark event as processed
+                if event.processed:
+                    logger.debug(f"[Event {event_id}] Already processed, skipping")
+                    results.append({"event_id": event_id, "status": "already_processed"})
+                    continue
+                
+                # 2. Validate payload shape
+                try:
+                    validated_payload = validate_payload_shape(event.payload)
+                except PayloadValidationError as e:
+                    error_msg = f"Payload validation: {str(e)}"
+                    logger.error(f"[Event {event_id}] {error_msg}")
+                    event.processing_error = error_msg[:255]
+                    failed_count += 1
+                    results.append({"event_id": event_id, "status": "validation_error", "error": error_msg})
+                    continue
+                
+                # Validate required fields
+                if not event.event_name or not event.event_type:
+                    error_msg = "Missing event_name or event_type"
+                    logger.error(f"[Event {event_id}] {error_msg}")
+                    event.processing_error = error_msg[:255]
+                    failed_count += 1
+                    results.append({"event_id": event_id, "status": "validation_error", "error": error_msg})
+                    continue
+                
+                # 3. Normalize payload with metadata
+                normalized_payload = normalize_event_payload(validated_payload)
+                event.properties = normalized_payload
+                
+                # 4. Mark processed_at with current timestamp
+                now = datetime.utcnow()
                 event.processed = True
-                event.processed_at = datetime.utcnow()
-                await session.commit()
+                event.processed_at = now
+                event.processing_error = None
+                
+                processed_count += 1
+                results.append({
+                    "event_id": event_id,
+                    "status": "processed",
+                    "event_name": event.event_name,
+                    "user_id": str(event.user_id),
+                    "processed_at": now.isoformat(),
+                })
+                
+                logger.debug(f"[Event {event_id}] Processed in batch")
                 
             except Exception as e:
-                await session.rollback()
-                raise e
-    
-    # Run async function
-    asyncio.run(_process())
-
-
-@celery_app.task(name="app.workers.tasks.aggregate_metrics_task")
-def aggregate_metrics_task():
-    """Aggregate metrics periodically."""
-    import asyncio
-    
-    async def _aggregate():
-        async with async_session_maker() as session:
-            try:
-                # Get unique metric names from last hour
-                one_hour_ago = datetime.utcnow() - timedelta(hours=1)
-                
-                result = await session.execute(
-                    select(Metric.metric_name)
-                    .where(Metric.timestamp >= one_hour_ago)
-                    .distinct()
-                )
-                metric_names = [row[0] for row in result.all()]
-                
-                # Aggregate each metric
-                for metric_name in metric_names:
-                    aggregation = await metric_service.aggregate_metrics(
-                        session,
-                        metric_name=metric_name,
-                        start_date=one_hour_ago,
-                        end_date=datetime.utcnow(),
-                        time_bucket="hour"
-                    )
-                    
-                    # Cache aggregated result
-                    await redis_client.set(
-                        f"metric:hourly:{metric_name}",
-                        {
-                            "average": aggregation.average,
-                            "total": aggregation.total_sum,
-                            "count": aggregation.total_count,
-                            "timestamp": datetime.utcnow().isoformat(),
-                        },
-                        expire=3600  # 1 hour
-                    )
-                
-                await session.commit()
-                
-            except Exception as e:
-                await session.rollback()
-                raise e
-    
-    asyncio.run(_aggregate())
-
-
-@celery_app.task(name="app.workers.tasks.cleanup_old_events_task")
-def cleanup_old_events_task(days: int = 90):
-    """Clean up events older than specified days."""
-    import asyncio
-    
-    async def _cleanup():
-        async with async_session_maker() as session:
-            try:
-                cutoff_date = datetime.utcnow() - timedelta(days=days)
-                
-                # Delete old processed events
-                stmt = delete(Event).where(
-                    Event.processed == True,
-                    Event.event_timestamp < cutoff_date
-                )
-                
-                result = await session.execute(stmt)
-                deleted_count = result.rowcount
-                
-                await session.commit()
-                
-                return {"deleted_events": deleted_count, "cutoff_date": cutoff_date.isoformat()}
-                
-            except Exception as e:
-                await session.rollback()
-                raise e
-    
-    return asyncio.run(_cleanup())
-
-
-@celery_app.task(name="app.workers.tasks.send_metric_alert_task")
-def send_metric_alert_task(metric_name: str, value: float, threshold: float):
-    """Send alert when metric exceeds threshold."""
-    import asyncio
-    
-    async def _send_alert():
-        # Placeholder for alert logic
-        # In production, integrate with email, Slack, PagerDuty, etc.
-        await redis_client.set(
-            f"alert:{metric_name}:{datetime.utcnow().isoformat()}",
-            {
-                "metric_name": metric_name,
-                "value": value,
-                "threshold": threshold,
-                "timestamp": datetime.utcnow().isoformat(),
-            },
-            expire=86400  # 24 hours
+                error_msg = f"Batch processing error: {str(e)}"
+                logger.error(f"[Event {event_id}] {error_msg}", exc_info=True)
+                failed_count += 1
+                results.append({"event_id": event_id, "status": "error", "error": error_msg})
+        
+        # 5. Persist all changes to DB in single transaction
+        try:
+            persist_event_to_db(session, None)  # Commit all changes
+            logger.info(f"[Batch] Persisted {processed_count} processed events")
+        except Exception as e:
+            session.rollback()
+            logger.error(f"[Batch] Failed to persist changes: {str(e)}")
+            return {
+                "status": "failed",
+                "total_events": len(event_ids),
+                "processed": processed_count,
+                "failed": failed_count,
+                "error": "Failed to persist batch to database",
+                "results": results,
+            }
+        
+        logger.info(
+            f"[Batch] Completed: {processed_count} processed, "
+            f"{failed_count} failed out of {len(event_ids)} total"
         )
         
-        # Publish alert to Redis channel
-        await redis_client.publish(
-            "alerts",
-            {
-                "type": "metric_threshold",
-                "metric_name": metric_name,
-                "value": value,
-                "threshold": threshold,
-            }
-        )
-    
-    asyncio.run(_send_alert())
+        return {
+            "status": "success" if failed_count == 0 else "partial",
+            "total_events": len(event_ids),
+            "processed": processed_count,
+            "failed": failed_count,
+            "results": results,
+        }

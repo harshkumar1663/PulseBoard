@@ -1,0 +1,551 @@
+{
+  "info": {
+    "name": "PulseBoard Black-Box API Testing",
+    "description": "Black-box API testing suite - observable HTTP behavior only",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "1. API Discovery",
+      "item": [
+        {
+          "name": "1.1 Health Check",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/health",
+              "host": ["{{base_url}}"],
+              "path": ["health"]
+            }
+          }
+        },
+        {
+          "name": "1.2 OpenAPI Schema",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/openapi.json",
+              "host": ["{{base_url}}"],
+              "path": ["openapi.json"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Authentication",
+      "item": [
+        {
+          "name": "2.1 Register User",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"testuser{{$timestamp}}@example.com\",\n  \"password\": \"TestPassword123!\",\n  \"full_name\": \"Test User\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/register",
+              "host": ["{{base_url}}"],
+              "path": ["api", "auth", "register"]
+            }
+          }
+        },
+        {
+          "name": "2.3 Login User",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{user_email}}\",\n  \"password\": \"TestPassword123!\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["api", "auth", "login"]
+            },
+            "description": "Expected: 200 with access_token"
+          }
+        },
+        {
+          "name": "2.4 Login - Invalid Password",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{user_email}}\",\n  \"password\": \"WrongPassword\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/auth/login",
+              "host": ["{{base_url}}"],
+              "path": ["api", "auth", "login"]
+            },
+            "description": "Expected: 401 Unauthorized"
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Authorization",
+      "item": [
+        {
+          "name": "3.1 Get Events - No Token",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/v1/events",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "events"]
+            },
+            "description": "Expected: 401 Unauthorized"
+          }
+        },
+        {
+          "name": "3.2 Get Events - Invalid Token",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer invalid_token_string"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/events",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "events"]
+            },
+            "description": "Expected: 401 Unauthorized"
+          }
+        },
+        {
+          "name": "3.4 Get Events - Valid Token",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/events",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "events"]
+            },
+            "description": "Expected: 200 OK with array of events"
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Event Ingestion",
+      "item": [
+        {
+          "name": "4.1 Submit Single Event",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event_name\": \"page_view\",\n  \"event_type\": \"engagement\",\n  \"source\": \"web\",\n  \"session_id\": \"sess_test_001\",\n  \"payload\": {\n    \"page\": \"/home\",\n    \"duration\": 45,\n    \"scroll_depth\": 75\n  }\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/events",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "events"]
+            },
+            "description": "Expected: 202 Accepted with event_id and task_id"
+          }
+        },
+        {
+          "name": "4.2 Submit Event - Missing Required Field",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event_name\": \"page_view\",\n  \"source\": \"web\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/events",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "events"]
+            },
+            "description": "Expected: 422 Unprocessable Entity"
+          }
+        },
+        {
+          "name": "4.3 Submit Event - Empty Event Name",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event_name\": \"\",\n  \"event_type\": \"engagement\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/events",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "events"]
+            },
+            "description": "Expected: 422 Unprocessable Entity"
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Batch Events",
+      "item": [
+        {
+          "name": "5.1 Submit Batch Events",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"events\": [\n    {\n      \"event_name\": \"event_1\",\n      \"event_type\": \"type_1\",\n      \"payload\": {\"data\": \"test1\"}\n    },\n    {\n      \"event_name\": \"event_2\",\n      \"event_type\": \"type_2\",\n      \"payload\": {\"data\": \"test2\"}\n    },\n    {\n      \"event_name\": \"event_3\",\n      \"event_type\": \"type_3\",\n      \"payload\": {\"data\": \"test3\"}\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/events/batch",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "events", "batch"]
+            },
+            "description": "Expected: 202 Accepted with event_ids array and task_id"
+          }
+        },
+        {
+          "name": "5.2 Submit Empty Batch",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"events\": []\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/events/batch",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "events", "batch"]
+            },
+            "description": "Expected: 422 Unprocessable Entity"
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Async & Observable Effects",
+      "item": [
+        {
+          "name": "6.2 Get Event - Before Processing",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/events/{{event_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "events", "{{event_id}}"]
+            },
+            "description": "Expected: 200 OK with processed=false"
+          }
+        },
+        {
+          "name": "6.3 Get Event - After Processing (Wait 3s)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/events/{{event_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "events", "{{event_id}}"]
+            },
+            "description": "Expected: 200 OK with processed=true and processed_at timestamp"
+          }
+        },
+        {
+          "name": "6.5 Verify Metadata - normalized_at",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/events/{{event_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "events", "{{event_id}}"]
+            },
+            "description": "Expected: properties object contains normalized_at ISO timestamp"
+          }
+        }
+      ]
+    },
+    {
+      "name": "8. Event Retrieval",
+      "item": [
+        {
+          "name": "8.1 List Events",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/events?limit=10&offset=0",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "events"],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "10"
+                },
+                {
+                  "key": "offset",
+                  "value": "0"
+                }
+              ]
+            },
+            "description": "Expected: 200 OK with array of events"
+          }
+        },
+        {
+          "name": "8.2 List Events - Pagination Page 2",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/events?limit=5&offset=5",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "events"],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "5"
+                },
+                {
+                  "key": "offset",
+                  "value": "5"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "8.3 Get Single Event by ID",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/events/{{event_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "events", "{{event_id}}"]
+            }
+          }
+        },
+        {
+          "name": "8.4 Get Non-existent Event",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/events/999999",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "events", "999999"]
+            },
+            "description": "Expected: 404 Not Found"
+          }
+        }
+      ]
+    },
+    {
+      "name": "9. Error Handling",
+      "item": [
+        {
+          "name": "9.1 Malformed JSON",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{invalid json}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/events",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "events"]
+            },
+            "description": "Expected: 400 Bad Request"
+          }
+        },
+        {
+          "name": "9.3 Method Not Allowed (PUT)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/events",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "events"]
+            },
+            "description": "Expected: 405 Method Not Allowed or 404 Not Found"
+          }
+        }
+      ]
+    },
+    {
+      "name": "11. Statistics",
+      "item": [
+        {
+          "name": "11.1 Get Event Statistics",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{access_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/events/status/unprocessed",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "events", "status", "unprocessed"]
+            },
+            "description": "Expected: 200 OK with unprocessed_count and total_count"
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000"
+    },
+    {
+      "key": "user_email",
+      "value": "testuser@example.com"
+    },
+    {
+      "key": "access_token",
+      "value": ""
+    },
+    {
+      "key": "event_id",
+      "value": ""
+    }
+  ]
+}

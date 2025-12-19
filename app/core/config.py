@@ -2,6 +2,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict # type: ignore
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+    )
     PROJECT_NAME: str = "PulseBoard"
     VERSION: str = "1.0.0"
 
@@ -42,11 +47,24 @@ class Settings(BaseSettings):
     def REDIS_URL(self) -> str:
         return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}"
 
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        case_sensitive=True,
-        extra="ignore",
-    )
+    # Celery (env overrides optional)
+    CELERY_BROKER_URL: str | None = None
+    CELERY_RESULT_BACKEND: str | None = None
+
+    @property
+    def CELERY_BROKER(self) -> str:
+        return self.CELERY_BROKER_URL or f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/0"
+
+    @property
+    def CELERY_BACKEND(self) -> str:
+        return self.CELERY_RESULT_BACKEND or f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}/1"
+
+    # Event Processing
+    EVENT_PROCESSING_TIMEOUT: int = 300
+    EVENT_MAX_RETRIES: int = 3
+    EVENT_RETRY_DELAY: int = 60
 
 
+# Instantiate settings once for application-wide use
 settings = Settings()
+

@@ -1,6 +1,7 @@
 """Database session management."""
+from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from app.core.config import settings
 
 
@@ -18,6 +19,27 @@ engine = create_async_engine(
 async_session_maker = async_sessionmaker(
     engine,
     class_=AsyncSession,
+    expire_on_commit=False,
+    autocommit=False,
+    autoflush=False,
+)
+
+# Create synchronous engine for Celery workers
+# Convert postgresql+asyncpg:// to postgresql+psycopg2://
+sync_db_url = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
+sync_engine = create_engine(
+    sync_db_url,
+    echo=settings.DEBUG,
+    pool_size=settings.DB_POOL_SIZE,
+    max_overflow=settings.DB_MAX_OVERFLOW,
+    pool_recycle=settings.DB_POOL_RECYCLE,
+    pool_pre_ping=True,
+)
+
+# Create sync session maker for Celery workers
+sync_session_maker = sessionmaker(
+    sync_engine,
+    class_=Session,
     expire_on_commit=False,
     autocommit=False,
     autoflush=False,

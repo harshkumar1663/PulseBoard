@@ -1,141 +1,161 @@
 """Event service for business logic."""
+import logging
 from datetime import datetime
 from typing import Optional, List
+from uuid import UUID as UUIDType
+
+from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_
 
 from app.models.event import Event
-from app.schemas.event import EventCreate, EventFilter
-from app.db.redis import redis_client
+from app.schemas.event import EventCreate, EventResponse
+
+logger = logging.getLogger(__name__)
 
 
 class EventService:
-    """Service layer for event operations."""
+    """Service for managing events."""
     
-    @staticmethod
-    async def create(
-        db: AsyncSession,
-        user_id: int,
-        event_in: EventCreate,
-        ip_address: Optional[str] = None,
-        user_agent: Optional[str] = None
-    ) -> Event:
-        """Create new event."""
-        event = Event(
+    async def create(self, db: AsyncSession, event_in: EventCreate, user_id: UUIDType) -> Event:
+        """Create a new event."""
+        db_event = Event(
             user_id=user_id,
             event_name=event_in.event_name,
             event_type=event_in.event_type,
             source=event_in.source,
             session_id=event_in.session_id,
+            payload=event_in.payload or {},
             properties=event_in.properties,
-            ip_address=ip_address or event_in.ip_address,
-            user_agent=user_agent or event_in.user_agent,
+            ip_address=event_in.ip_address,
+            user_agent=event_in.user_agent,
             event_timestamp=event_in.event_timestamp or datetime.utcnow(),
         )
-        
-        db.add(event)
-        await db.commit()
-        await db.refresh(event)
-        
-        # Cache event for real-time processing
-        await redis_client.set(
-            f"event:{event.id}",
-            {
-                "id": event.id,
-                "user_id": event.user_id,
-                "event_name": event.event_name,
-                "event_type": event.event_type,
-                "timestamp": event.event_timestamp.isoformat(),
-            },
-            expire=3600  # 1 hour
-        )
-        
-        return event
+        db.add(db_event)
+        await db.flush()
+        return db_event
     
-    @staticmethod
-    async def create_batch(
-        db: AsyncSession,
-        user_id: int,
-        events_in: List[EventCreate],
-        ip_address: Optional[str] = None,
-        user_agent: Optional[str] = None
-    ) -> List[Event]:
-        """Create multiple events in batch."""
-        events = []
-        for event_in in events_in:
-            event = Event(
-                user_id=user_id,
-                event_name=event_in.event_name,
-                event_type=event_in.event_type,
-                source=event_in.source,
-                session_id=event_in.session_id,
-                properties=event_in.properties,
-                ip_address=ip_address or event_in.ip_address,
-                user_agent=user_agent or event_in.user_agent,
-                event_timestamp=event_in.event_timestamp or datetime.utcnow(),
-            )
-            events.append(event)
-        
-        db.add_all(events)
-        await db.commit()
-        
-        # Refresh all events
-        for event in events:
-            await db.refresh(event)
-        
-        return events
-    
-    @staticmethod
-    async def get_by_id(db: AsyncSession, event_id: int) -> Optional[Event]:
+    async def get_by_id(self, db: AsyncSession, event_id: int) -> Optional[Event]:
         """Get event by ID."""
-        result = await db.execute(select(Event).where(Event.id == event_id))
+        stmt = select(Event).where(Event.id == event_id)
+        result = await db.execute(stmt)
         return result.scalar_one_or_none()
     
-    @staticmethod
-    async def get_user_events(
+    async def get_by_user_id(
+        self,
         db: AsyncSession,
-        user_id: int,
-        filters: EventFilter
+        user_id: UUIDType,
+        limit: int = 100,
+        offset: int = 0,
     ) -> List[Event]:
-        """Get events for a user with filters."""
-        query = select(Event).where(Event.user_id == user_id)
-        
-        # Apply filters
-        conditions = []
-        if filters.event_name:
-            conditions.append(Event.event_name == filters.event_name)
-        if filters.event_type:
-            conditions.append(Event.event_type == filters.event_type)
-        if filters.source:
-            conditions.append(Event.source == filters.source)
-        if filters.session_id:
-            conditions.append(Event.session_id == filters.session_id)
-        if filters.start_date:
-            conditions.append(Event.event_timestamp >= filters.start_date)
-        if filters.end_date:
-            conditions.append(Event.event_timestamp <= filters.end_date)
-        if filters.processed is not None:
-            conditions.append(Event.processed == filters.processed)
-        
-        if conditions:
-            query = query.where(and_(*conditions))
-        
-        query = query.order_by(Event.event_timestamp.desc())
-        query = query.limit(filters.limit).offset(filters.offset)
-        
-        result = await db.execute(query)
-        return list(result.scalars().all())
+        """Get events for a user."""
+        stmt = (
+            select(Event)
+            .where(Event.user_id == user_id)
+            .order_by(Event.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        result = await db.execute(stmt)
+        return result.scalars().all()
     
-    @staticmethod
-    async def mark_processed(db: AsyncSession, event_id: int) -> Optional[Event]:
+    async def get_unprocessed(
+        self,
+        db: AsyncSession,
+        limit: int = 100,
+    ) -> List[Event]:
+        """Get unprocessed events."""
+        stmt = (
+            select(Event)
+            .where(Event.processed == False)
+            .order_by(Event.created_at.asc())
+            .limit(limit)
+        )
+        result = await db.execute(stmt)
+        return result.scalars().all()
+    
+    async def get_by_session(
+        self,
+        db: AsyncSession,
+        user_id: UUIDType,
+        session_id: str,
+    ) -> List[Event]:
+        """Get events by session."""
+        stmt = select(Event).where(
+            and_(
+                Event.user_id == user_id,
+                Event.session_id == session_id
+            )
+        ).order_by(Event.event_timestamp.asc())
+        result = await db.execute(stmt)
+        return result.scalars().all()
+    
+    async def get_by_type(
+        self,
+        db: AsyncSession,
+        user_id: UUIDType,
+        event_type: str,
+        limit: int = 100,
+    ) -> List[Event]:
+        """Get events by type."""
+        stmt = (
+            select(Event)
+            .where(
+                and_(
+                    Event.user_id == user_id,
+                    Event.event_type == event_type
+                )
+            )
+            .order_by(Event.event_timestamp.desc())
+            .limit(limit)
+        )
+        result = await db.execute(stmt)
+        return result.scalars().all()
+    
+    async def count_unprocessed(self, db: AsyncSession) -> int:
+        """Count unprocessed events."""
+        stmt = select(func.count(Event.id)).where(Event.processed == False)
+        result = await db.execute(stmt)
+        return result.scalar() or 0
+    
+    async def count_by_user(self, db: AsyncSession, user_id: UUIDType) -> int:
+        """Count events for user."""
+        stmt = select(func.count(Event.id)).where(Event.user_id == user_id)
+        result = await db.execute(stmt)
+        return result.scalar() or 0
+    
+    async def mark_processed(
+        self,
+        db: AsyncSession,
+        event_id: int,
+        processed_at: Optional[datetime] = None,
+    ) -> Optional[Event]:
         """Mark event as processed."""
-        event = await EventService.get_by_id(db, event_id)
+        event = await self.get_by_id(db, event_id)
         if event:
             event.processed = True
-            event.processed_at = datetime.utcnow()
-            await db.commit()
-            await db.refresh(event)
+            event.processed_at = processed_at or datetime.utcnow()
+            await db.flush()
         return event
-
+    
+    async def update_error(
+        self,
+        db: AsyncSession,
+        event_id: int,
+        error: str,
+    ) -> Optional[Event]:
+        """Update event processing error."""
+        event = await self.get_by_id(db, event_id)
+        if event:
+            event.processing_error = error[:255]
+            await db.flush()
+        return event
+    
+    async def delete(self, db: AsyncSession, event_id: int) -> bool:
+        """Delete event."""
+        event = await self.get_by_id(db, event_id)
+        if event:
+            await db.delete(event)
+            return True
+        return False
 
 event_service = EventService()

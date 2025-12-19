@@ -27,6 +27,8 @@ app.include_router(api_router, prefix="/api")
 
 @app.on_event("startup")
 async def on_startup():
-    # Tables will be created via Alembic migrations
-    # Temporarily disabled to avoid DB creation issues
-    pass
+    """Ensure database tables exist on startup.
+    Alembic migrations are preferred in production; this is a safety net for local/test runs.
+    """
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
